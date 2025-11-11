@@ -5,7 +5,7 @@ WORKDIR /app
 RUN apt-get update && apt-get upgrade -y && \
     apt-get install -y git && \
     useradd -m gopher && \
-    chown -R gopher:gopher /app
-
+    chown -R gopher:gopher /app && \
+    go install golang.org/x/vuln/cmd/govulncheck@latest
 
 USER gopher 
