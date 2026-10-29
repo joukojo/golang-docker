@@ -14,8 +14,8 @@ This image is available at: [https://hub.docker.com/r/joukojo/golang/tags](https
 
 ## Features
 
-- **Base Image**: golang:1.25-trixie
-- **OS**: Debian Trixie (testing)
+- **Base Image**: golang:1.27-trixie (tracks Go 1.27 patch releases on rebuild)
+- **OS**: Debian Trixie
 - **Security**: Non-root user (`gopher`) for enhanced security
 - **Development Tools**: Git pre-installed
 - **Working Directory**: `/app`
@@ -23,11 +23,12 @@ This image is available at: [https://hub.docker.com/r/joukojo/golang/tags](https
 
 ## Image Details
 
-- **Go Version**: 1.25
+- **Go Version**: 1.27.x
 - **User**: gopher (non-root)
 - **Working Directory**: /app (owned by gopher user)
 - **Pre-installed Tools**:
   - Git
+  - govulncheck
   - All standard Go toolchain
 
 ## Usage
@@ -91,8 +92,13 @@ If you want to build the image locally:
 ```bash
 git clone <repository-url>
 cd golang-docker
-docker build -t joukojo/golang:latest .
+docker build --pull -t joukojo/golang:local .
+sh scripts/smoke-test.sh joukojo/golang:local
 ```
+
+CI builds and smoke-tests the image on Linux amd64 and arm64 before publishing.
+The checks verify Go 1.27, Git, govulncheck, the non-root user, and compilation
+in `/app`. Pull requests run these checks without publishing images.
 
 ## Environment Variables
 
