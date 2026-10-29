@@ -1,22 +1,40 @@
-name: Build & Publish Docker Image (GHCR + Docker Hub)
+name: Build, Publish & Release
 
 on:
   pull_request:
   push:
-    branches: [ "develop" ]      # Nightly builds
-    tags: [ "*" ]                # Any tag push (e.g., 1.13 or v1.13)
+    branches: [ "develop", "release/**" ]
+    tags: [ "v*.*.*" ]
   workflow_dispatch: {}
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   # ---- Registries & image names ----
   DOCKERHUB_IMAGE: joukojo/golang              # docker.io/your-dh-username/my-app
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and main ancestry
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash scripts/validate-release.sh "$RELEASE_TAG"
+
   smoke:
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,6 +69,8 @@ jobs:
     needs: smoke
     if: github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    outputs:
+      release_digest: ${{ steps.push_release.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -108,10 +128,9 @@ jobs:
           images: |
             ${{ env.DOCKERHUB_IMAGE }}
           tags: |
-            # Produces the tag equal to your Git tag, e.g., "1.13" or "1.13.2"
-            # If your Git tag is "v1.13", {{version}} becomes "1.13".
+            # v1.27.3 publishes the image tag 1.27.3.
             type=semver,pattern={{version}}
-            # Optional: also publish "latest" on every release tag
+            # Stable releases also update latest.
             type=raw,value=latest
           labels: |
             org.opencontainers.image.source=${{ github.repository }}
@@ -120,6 +139,7 @@ jobs:
             org.opencontainers.image.created={{date 'YYYY-MM-DDTHH:mm:ssZ'}}
 
       - name: Build & push (release)
+        id: push_release
         if: startsWith(github.ref, 'refs/tags/')
         uses: docker/build-push-action@v7
         with:
@@ -131,3 +151,21 @@ jobs:
           labels: ${{ steps.meta_release.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  release:
+    needs: docker
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Publish GitHub Release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          IMAGE_DIGEST: ${{ needs.docker.outputs.release_digest }}
+        run: bash scripts/create-release.sh

@@ -3,19 +3,19 @@ set -eu
 
 image=${1:?Usage: smoke-test.sh IMAGE [PLATFORM]}
 platform=${2:-}
+expected_go_version=$(sed -n 's/^FROM golang:\([0-9][0-9.]*\)-trixie$/\1/p' Dockerfile)
+test -n "$expected_go_version"
 set -- "$image"
 if [ -n "$platform" ]; then
     set -- --platform "$platform" "$image"
 fi
 
-docker run --rm -i -e GOTOOLCHAIN=local "$@" sh -eu <<'EOF'
+docker run --rm -i -e GOTOOLCHAIN=local -e EXPECTED_GO_VERSION="$expected_go_version" "$@" sh -eu <<'EOF'
 test "$(id -un)" = gopher
 test "$(id -u)" -ne 0
 test "$PWD" = /app
-case "$(go env GOVERSION)" in
-    go1.27.*) go version ;;
-    *) echo 'Expected Go 1.27.x' >&2; exit 1 ;;
-esac
+test "$(go env GOVERSION)" = "go$EXPECTED_GO_VERSION"
+go version
 git --version
 govulncheck -version
 test -w /go
