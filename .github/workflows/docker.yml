@@ -1,45 +1,90 @@
-name: Build & Publish Docker Image (GHCR + Docker Hub)
+name: Build, Publish & Release
 
 on:
+  pull_request:
   push:
-    branches: [ "develop" ]      # Nightly builds
-    tags: [ "*" ]                # Any tag push (e.g., 1.13 or v1.13)
+    branches: [ "develop", "release/**" ]
+    tags: [ "v*.*.*" ]
   workflow_dispatch: {}
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   # ---- Registries & image names ----
-  GHCR_REGISTRY: ghcr.io
-  GHCR_IMAGE: ${{ github.repository_owner }}/golang     # ghcr.io/OWNER/my-app
   DOCKERHUB_IMAGE: joukojo/golang              # docker.io/your-dh-username/my-app
 
 jobs:
-  docker:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and main ancestry
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash scripts/validate-release.sh "$RELEASE_TAG"
+
+  smoke:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      # ---- Log in to GHCR ----
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - name: Build smoke-test image
+        uses: docker/build-push-action@v7
         with:
-          registry: ${{ env.GHCR_REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          context: .
+          pull: true
+          load: true
+          platforms: linux/${{ matrix.arch }}
+          tags: golang-smoke:local
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Smoke-test image
+        run: sh scripts/smoke-test.sh golang-smoke:local linux/${{ matrix.arch }}
+
+  docker:
+    needs: smoke
+    if: github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    outputs:
+      release_digest: ${{ steps.push_release.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
 
       # ---- Log in to Docker Hub ----
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -48,10 +93,9 @@ jobs:
       - name: Docker meta (nightly)
         id: meta_nightly
         if: github.ref == 'refs/heads/develop'
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
-            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
             ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=raw,value=nightly
@@ -64,9 +108,10 @@ jobs:
 
       - name: Build & push (nightly)
         if: github.ref == 'refs/heads/develop'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
+          pull: true
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta_nightly.outputs.tags }}
@@ -78,16 +123,14 @@ jobs:
       - name: Docker meta (release)
         id: meta_release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
-            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
             ${{ env.DOCKERHUB_IMAGE }}
           tags: |
-            # Produces the tag equal to your Git tag, e.g., "1.13" or "1.13.2"
-            # If your Git tag is "v1.13", {{version}} becomes "1.13".
+            # v1.27.3 publishes the image tag 1.27.3.
             type=semver,pattern={{version}}
-            # Optional: also publish "latest" on every release tag
+            # Stable releases also update latest.
             type=raw,value=latest
           labels: |
             org.opencontainers.image.source=${{ github.repository }}
@@ -96,13 +139,33 @@ jobs:
             org.opencontainers.image.created={{date 'YYYY-MM-DDTHH:mm:ssZ'}}
 
       - name: Build & push (release)
+        id: push_release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
+          pull: true
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta_release.outputs.tags }}
           labels: ${{ steps.meta_release.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  release:
+    needs: docker
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Publish GitHub Release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          IMAGE_DIGEST: ${{ needs.docker.outputs.release_digest }}
+        run: bash scripts/create-release.sh
